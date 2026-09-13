@@ -1,0 +1,17 @@
+{
+  "name": "red-dawn-bot",
+  "version": "3.0.0",
+  "description": "Fast, modular Discord + Nitrado bot for Red Dawn DayZ Xbox servers.",
+  "main": "dawn.js",
+  "scripts": {
+    "start": "node dawn.js",
+    "check": "node --check dawn.js"
+  },
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "dependencies": {
+    "discord.js": "^14.25.1",
+    "dotenv": "^17.2.2"
+  }
+}

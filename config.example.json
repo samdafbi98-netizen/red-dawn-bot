@@ -1,0 +1,16 @@
+{
+  "guildId": "",
+  "adminRoleIds": [],
+  "modRoleIds": [],
+  "statusChannelId": "",
+  "logChannelId": "",
+  "announceChannelId": "",
+  "maintenance": false,
+  "feedChannels": {},
+  "feedFiles": [],
+  "feedsEnabled": false,
+  "watchlistIds": [],
+  "notes": {},
+  "reports": [],
+  "tickets": {}
+}
