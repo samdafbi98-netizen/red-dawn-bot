@@ -1,7 +1,7 @@
 {
   "name": "red-dawn-bot",
-  "version": "3.0.0",
-  "description": "Fast, modular Discord + Nitrado bot for Red Dawn DayZ Xbox servers.",
+  "version": "4.0.0",
+  "description": "Red Dawn DayZ Xbox Discord + Nitrado command center with grouped server, player, file, feed and moderation controls.",
   "main": "dawn.js",
   "scripts": {
     "start": "node dawn.js",

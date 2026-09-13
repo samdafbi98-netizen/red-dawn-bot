@@ -1,46 +1,75 @@
-# Red Dawn Bot v3
+# Red Dawn Bot v4
 
-A fast, modular Discord + Nitrado bot for Red Dawn DayZ servers.
+A grouped Discord + Nitrado command center for Red Dawn DayZ Xbox servers.
 
 ## What changed
-- Exactly 100 guild slash commands.
-- Fast Nitrado API calls with short-lived caching and request timeouts.
-- Admin/mod permission gates.
-- Kill/PvP/hit/death/build/placement/join/leave feed engine based on Nitrado DayZ logs.
-- Feed testing tools so you can validate your server's log format before enabling live feeds.
-- Player stats, reports, staff notes, watchlist, Discord moderation, polls, events, giveaways, and dashboards.
-- Uses `MessageFlags.Ephemeral` rather than the deprecated `ephemeral: true` interaction option.
+The bot uses command groups so it can hold far more actions than a flat slash-command list while keeping Discord easy to navigate.
+
+### Direct shortcuts
+- `/ping`
+- `/status`
+- `/players`
+- `/serverinfo`
+- `/restart` (admin + confirmation)
+- `/nitrado`
+- `/help`
+
+### Command groups
+- `/server` — status, dashboard, info, players, services, service, notifications, IP, map, slots, online, refresh, health, latency, start, stop, restart, maintenance, announce, scheduled restart, daily restart, query, uptime
+- `/player` — online list/search, tracked stats, ban/whitelist/priority lists, watchlist, notes, reports, snapshots
+- `/settings` — available settings, sets, defaults, get, set, current server settings
+- `/file` — list/search, tail/head/read, size/stat, download/upload, delete, move/copy, mkdir, log discovery, bookmarks
+- `/backup` — list/count/info/reminder
+- `/feed` — live log feeds, log discovery, file/channel mapping, tests, recent event views, start/stop
+- `/stats` — leaderboards, kills, deaths, K/D, hits, activity, player view, reset/export
+- `/moderation` — clear, slowmode, lock/unlock, timeout, warn/warnings, kick, ban/unban, audit, role configuration
+- `/community` — announcements, polls, tickets, events, suggestions, rules, links, verification
+- `/bot` — help, ping, uptime, about, health, latency, safe config, cache, channels, command counts
+
+## Security
+- Never commit `.env`.
+- Discord and Nitrado tokens are environment variables only.
+- Server start/stop/restart and file deletion require admin permission plus confirmation.
+- Settings writes and file mutations are permission-gated.
+- File paths reject `..` traversal segments.
 
 ## Install
 ```bat
 npm install
+node dawn.js
 ```
-Copy `.env.example` to `.env` and fill in:
+
+Required environment variables:
 - `DISCORD_TOKEN`
 - `DISCORD_GUILD_ID`
 - `NITRADO_TOKEN`
 - `NITRADO_SERVICE_ID`
 
 Optional:
-- `NITRADO_LOG_DIR=dayzstandalone/logs`
-- `FEED_POLL_MS=10000`
+- `RED_DAWN_NAME`
+- `RED_DAWN_RULES`
+- `RED_DAWN_LINKS`
+- `RED_DAWN_VERIFY`
+- `FEED_POLL_MS`
+- `NITRADO_LOG_DIR`
+- `NITRADO_API_TIMEOUT_MS`
 
-Start:
-```bat
-node dawn.js
-```
+## Render
+Use a Node Background Worker:
+- Build command: `npm install`
+- Start command: `node dawn.js`
 
-## Feed setup
-1. `/findlogs` — see log paths available through the Nitrado file server.
-2. `/feedfile path:<path>` — add a log file to poll.
-3. Set feed channels with `/setkillfeed`, `/setpvpfeed`, `/sethitfeed`, `/setdeathfeed`, `/setbuildfeed`, `/setplacementfeed`, `/setconnectfeed`.
-4. `/feedtest` — test parsing against sample lines.
-5. `/feedstart` — start polling.
+Add the environment variables in Render. Do not upload `.env` to GitHub.
 
-### Important Xbox limitation
-DayZ console servers do not expose the same PC RCON/admin-command surface. Nitrado documents PC-only DayZ admin/RCON commands, while its console documentation focuses on console server settings. The feed system here therefore uses **Nitrado log files**, not fake RCON events. citeturn180237search1turn180237search5
+## Feeds
+1. `/feed discover`
+2. `/feed file-add path:<remote path>`
+3. `/feed channel type:<feed type> channel:<channel>`
+4. `/feed test type:<type>`
+5. `/feed start`
+6. `/feed status`
 
-A kill feed is only as accurate as the log lines your particular DayZ/Xbox server writes. If your logs use a different format, update `detectLine()` in `dawn.js` with the actual sample lines from `/findlogs`/your Nitrado log file.
+The parser is intentionally conservative. Actual DayZ log formats vary, so verify your real log lines with `/file tail` and expand parsing patterns from the logs you actually receive.
 
-## Security
-Never paste your Discord or Nitrado token into Discord or source code. Keep them in `.env`, and do not commit `.env` to Git.
+## Nitrado file server
+The file tools use Nitrado's documented file-server list/search, seek, download, upload-token, delete, move, copy and mkdir flows. The upload/download/seek code uses the temporary tokens returned by Nitrado rather than exposing them in Discord.

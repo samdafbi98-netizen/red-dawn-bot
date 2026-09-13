@@ -1,16 +1,17 @@
 {
-  "guildId": "",
-  "adminRoleIds": [],
-  "modRoleIds": [],
-  "statusChannelId": "",
-  "logChannelId": "",
-  "announceChannelId": "",
+  "adminRoleId": "",
+  "modRoleId": "",
   "maintenance": false,
+  "feedsEnabled": false,
+  "feedIntervalMs": 10000,
   "feedChannels": {},
   "feedFiles": [],
-  "feedsEnabled": false,
-  "watchlistIds": [],
+  "watchlist": [],
   "notes": {},
+  "warnings": {},
   "reports": [],
-  "tickets": {}
+  "events": [],
+  "scheduledRestartAt": null,
+  "recurringRestart": null,
+  "audit": []
 }
