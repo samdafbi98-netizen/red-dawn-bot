@@ -1,7 +1,7 @@
 {
   "name": "red-dawn-bot",
-  "version": "4.0.0",
-  "description": "Red Dawn DayZ Xbox Discord + Nitrado command center with grouped server, player, file, feed and moderation controls.",
+  "version": "5.0.0",
+  "description": "Public multi-server Red Dawn Discord + Nitrado control center with per-guild encrypted configuration and owner/admin authorization.",
   "main": "dawn.js",
   "scripts": {
     "start": "node dawn.js",
@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "discord.js": "^14.25.1",
-    "dotenv": "^17.2.2"
+    "dotenv": "^17.2.2",
+    "pg": "^8.16.3"
   }
 }

@@ -13,5 +13,7 @@
   "events": [],
   "scheduledRestartAt": null,
   "recurringRestart": null,
-  "audit": []
+  "audit": [],
+  "nitradoServiceId": "",
+  "setupCompletedAt": null
 }

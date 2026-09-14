@@ -13,28 +13,25 @@ const {
   MessageFlags,
   AttachmentBuilder,
   ChannelType,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 require('dotenv').config();
 
-const VERSION = '4.0.0';
+const { AsyncLocalStorage } = require('node:async_hooks');
+const { initDatabase, getGuild, saveGuild, listGuilds, closeDatabase } = require('./db');
+const { encryptJson, decryptJson } = require('./security');
+
+const VERSION = '5.0.0';
 const START_TIME = Date.now();
 const ROOT = __dirname;
 const CONFIG_PATH = path.join(ROOT, 'config.json');
 const STATS_PATH = path.join(ROOT, 'stats.json');
 
-function loadJson(file, fallback) {
-  try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    return fallback;
-  }
-}
-function saveJson(file, value) {
-  fs.writeFileSync(file, JSON.stringify(value, null, 2));
-}
 function mergeConfig(base, incoming) {
   return {
     ...base,
@@ -65,17 +62,99 @@ const DEFAULT_CONFIG = {
   scheduledRestartAt: null,
   recurringRestart: null,
   audit: [],
+  nitradoServiceId: '',
+  nitradoToken: '',
+  setupCompletedAt: null,
 };
+
 const DEFAULT_STATS = {
   players: {},
   lastEvents: [],
   lastPlayerSnapshot: [],
 };
 
-let config = mergeConfig(DEFAULT_CONFIG, loadJson(CONFIG_PATH, {}));
-let stats = loadJson(STATS_PATH, DEFAULT_STATS);
+const tenantALS = new AsyncLocalStorage();
+const tenantCache = new Map();
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+function activeContext() {
+  const ctx = tenantALS.getStore();
+  if (!ctx) throw new Error('No server context is active.');
+  return ctx;
+}
+function activeConfig() { return activeContext().config; }
+function activeStats() { return activeContext().stats; }
+
+const config = new Proxy({}, {
+  get(_target, prop) { return activeConfig()[prop]; },
+  set(_target, prop, value) { activeConfig()[prop] = value; activeContext().dirty = true; return true; },
+  ownKeys() { return Reflect.ownKeys(activeConfig()); },
+  getOwnPropertyDescriptor() { return { enumerable: true, configurable: true }; },
+});
+const stats = new Proxy({}, {
+  get(_target, prop) { return activeStats()[prop]; },
+  set(_target, prop, value) { activeStats()[prop] = value; activeContext().dirty = true; return true; },
+  ownKeys() { return Reflect.ownKeys(activeStats()); },
+  getOwnPropertyDescriptor() { return { enumerable: true, configurable: true }; },
+});
+
+function saveJson(file) {
+  const ctx = tenantALS.getStore();
+  if (ctx && (file === CONFIG_PATH || file === STATS_PATH)) ctx.dirty = true;
+}
+
+async function loadTenant(guildId, ownerId) {
+  const cached = tenantCache.get(guildId);
+  if (cached) {
+    if (ownerId && cached.ownerId !== ownerId) cached.ownerId = ownerId;
+    return cached;
+  }
+  const row = await getGuild(guildId);
+  let configValue = mergeConfig(DEFAULT_CONFIG, {});
+  let statsValue = JSON.parse(JSON.stringify(DEFAULT_STATS));
+  if (row) {
+    configValue = mergeConfig(DEFAULT_CONFIG, decryptJson(row.config_enc));
+    statsValue = decryptJson(row.stats_enc);
+  }
+  const tenant = { guildId, ownerId: ownerId || row?.owner_id || '', config: configValue, stats: statsValue };
+  tenantCache.set(guildId, tenant);
+  if (!row) {
+    await persistTenant(tenant);
+  } else if (ownerId && row.owner_id !== ownerId) {
+    await persistTenant(tenant);
+  }
+  return tenant;
+}
+
+async function persistTenant(tenant) {
+  await saveGuild({
+    guildId: tenant.guildId,
+    ownerId: tenant.ownerId || '',
+    configEnc: encryptJson(tenant.config),
+    statsEnc: encryptJson(tenant.stats),
+  });
+}
+
+async function withGuildContext(guildId, ownerId, fn) {
+  const tenant = await loadTenant(guildId, ownerId);
+  const ctx = { guildId, ownerId: tenant.ownerId, config: tenant.config, stats: tenant.stats, dirty: false };
+  return tenantALS.run(ctx, async () => {
+    try {
+      return await fn();
+    } finally {
+      tenant.ownerId = ctx.ownerId || tenant.ownerId;
+      if (ctx.dirty) await persistTenant(tenant);
+    }
+  });
+}
+
+async function ensureConnectedGuilds() {
+  for (const guild of tenantCache.values()) {
+    // no-op: cache entries are already ready
+  }
+  for (const guild of client.guilds.cache.values()) {
+    await loadTenant(guild.id, guild.ownerId);
+  }
+}
 
 function safe(value, max = 900) {
   const text = String(value ?? '');
@@ -92,12 +171,18 @@ function msDuration(ms) {
   return [d ? `${d}d` : '', h ? `${h}h` : '', m ? `${m}m` : '', `${seconds}s`].filter(Boolean).join(' ');
 }
 function serviceId() {
-  const id = process.env.NITRADO_SERVICE_ID;
-  if (!id) throw new Error('NITRADO_SERVICE_ID is missing from Render Environment Variables.');
+  const id = String(activeConfig().nitradoServiceId || '').trim();
+  if (!id) throw new Error('This Discord server is not connected to Nitrado. An owner must run /setup connect.');
   return id;
 }
+function nitradoToken() {
+  const token = String(activeConfig().nitradoToken || '').trim();
+  if (!token) throw new Error('This Discord server is not connected to Nitrado. An owner must run /setup connect.');
+  return token;
+}
 function requireNitrado() {
-  if (!process.env.NITRADO_TOKEN) throw new Error('NITRADO_TOKEN is missing from Render Environment Variables.');
+  nitradoToken();
+  serviceId();
 }
 function guildOnly(i) {
   if (!i.guild) {
@@ -109,9 +194,16 @@ function guildOnly(i) {
 function hasRole(i, roleId) {
   return Boolean(roleId && i.member?.roles?.cache?.has(roleId));
 }
+async function requireOwner(i) {
+  if (!guildOnly(i)) return false;
+  if (i.guild.ownerId === i.user.id) return true;
+  await i.reply(eph('❌ Only the Discord server owner can change Nitrado credentials or Red Dawn security settings.'));
+  return false;
+}
+
 async function requireAdmin(i) {
   if (!guildOnly(i)) return false;
-  if (i.member.permissions.has(PermissionFlagsBits.Administrator) || hasRole(i, config.adminRoleId)) return true;
+  if (i.guild.ownerId === i.user.id || i.member.permissions.has(PermissionFlagsBits.Administrator) || i.member.permissions.has(PermissionFlagsBits.ManageGuild) || hasRole(i, config.adminRoleId)) return true;
   await i.reply(eph('❌ Administrator permission or the configured Red Dawn admin role is required.'));
   return false;
 }
@@ -202,7 +294,7 @@ async function nitradoRequest(endpoint, options = {}) {
     const response = await fetch(`${API_BASE}${endpoint}`, {
       method,
       headers: {
-        Authorization: `Bearer ${process.env.NITRADO_TOKEN}`,
+        Authorization: `Bearer ${nitradoToken()}`,
         Accept: 'application/json',
         ...(options.body ? { 'Content-Type': 'application/json' } : {}),
       },
@@ -214,6 +306,25 @@ async function nitradoRequest(endpoint, options = {}) {
     try { data = JSON.parse(text); } catch { data = { raw: text }; }
     if (!response.ok) throw new Error(`Nitrado API ${response.status}: ${safe(data?.message || data?.error || response.statusText, 500)}`);
     if (method === 'GET' && ttl) apiCache.set(key, { at: Date.now(), value: data });
+    return data;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function testNitradoCredentials(token, svcId) {
+  if (!/^\d{6,}$/.test(String(svcId))) throw new Error('Nitrado Service ID must be numeric.');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Number(process.env.NITRADO_API_TIMEOUT_MS) || 12000);
+  try {
+    const response = await fetch(`${API_BASE}/services/${svcId}/gameservers`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+      signal: controller.signal,
+    });
+    const body = await response.text();
+    let data = null;
+    try { data = JSON.parse(body); } catch {}
+    if (!response.ok) throw new Error(`Nitrado API ${response.status}: ${safe(data?.message || data?.error || response.statusText, 500)}`);
     return data;
   } finally {
     clearTimeout(timer);
@@ -370,8 +481,8 @@ async function publishFeed(evt) {
   }
 }
 
-let feedTimer = null;
-let feedPosition = new Map();
+const feedTimers = new Map();
+const feedPositions = new Map();
 async function discoverLogs() {
   const roots = Array.from(new Set(['', 'dayzstandalone', 'dayzstandalone/logs', 'gameserver', 'gameserver/logs', process.env.NITRADO_LOG_DIR || ''].filter(Boolean)));
   const found = [];
@@ -393,12 +504,13 @@ async function pollFeedFile(remotePath) {
     const sizeData = await fileSize(remotePath);
     const rawSize = sizeData?.data?.size ?? sizeData?.size ?? 0;
     const size = Number(rawSize) || 0;
-    const previous = feedPosition.get(remotePath) ?? Math.max(0, size - 16000);
+    const positionKey = `${activeContext().guildId}:${remotePath}`;
+    const previous = feedPositions.get(positionKey) ?? Math.max(0, size - 16000);
     const offset = Math.min(previous, size);
     const length = Math.min(24000, Math.max(0, size - offset));
     if (!length) return;
     const text = await fileSeek(remotePath, offset, length, 'raw');
-    feedPosition.set(remotePath, size);
+    feedPositions.set(positionKey, size);
     for (const line of text.split(/\r?\n/).filter(Boolean)) {
       const evt = parseLogLine(line);
       if (evt.type === 'raw') continue;
@@ -421,18 +533,25 @@ async function pollFeedFile(remotePath) {
   }
 }
 async function startFeeds() {
+  const guildId = activeContext().guildId;
+  const ownerId = activeContext().ownerId;
   stopFeeds();
   config.feedsEnabled = true;
   saveJson(CONFIG_PATH, config);
-  feedTimer = setInterval(async () => {
-    if (!config.feedsEnabled) return;
-    for (const file of config.feedFiles || []) await pollFeedFile(file);
+  const timer = setInterval(() => {
+    withGuildContext(guildId, ownerId, async () => {
+      if (!config.feedsEnabled) return;
+      for (const file of config.feedFiles || []) await pollFeedFile(file);
+    }).catch(err => console.error(`Feed timer failed for ${guildId}:`, err.message));
   }, Math.max(5000, Number(config.feedIntervalMs) || 10000));
+  feedTimers.set(guildId, timer);
   await Promise.all((config.feedFiles || []).map(pollFeedFile));
 }
 function stopFeeds() {
-  if (feedTimer) clearInterval(feedTimer);
-  feedTimer = null;
+  const guildId = activeContext().guildId;
+  const timer = feedTimers.get(guildId);
+  if (timer) clearInterval(timer);
+  feedTimers.delete(guildId);
   config.feedsEnabled = false;
   saveJson(CONFIG_PATH, config);
 }
@@ -444,9 +563,9 @@ function confirmButtons(id) {
     new ButtonBuilder().setCustomId(`cancel:${id}`).setLabel('Cancel').setStyle(ButtonStyle.Secondary),
   );
 }
-function queueAction(userId, action, extra = {}) {
+function queueAction(guildId, userId, action, extra = {}) {
   const id = crypto.randomBytes(6).toString('hex');
-  pendingActions.set(id, { userId, action, extra, expires: Date.now() + 30000 });
+  pendingActions.set(id, { guildId, userId, action, extra, expires: Date.now() + 30000 });
   return id;
 }
 async function executeConfirmed(action, extra) {
@@ -489,6 +608,16 @@ commands.push(
   new SlashCommandBuilder().setName('restart').setDescription('Restart the Red Dawn Nitrado server'),
   new SlashCommandBuilder().setName('serverinfo').setDescription('Show detailed Red Dawn server info'),
 );
+
+commands.push(group('setup', 'Secure per-server Red Dawn configuration', [
+  s=>s.setName('connect').setDescription('Connect this Discord server to its Nitrado account'),
+  s=>s.setName('import-env').setDescription('Import the legacy Render Nitrado credentials into this server'),
+  s=>s.setName('disconnect').setDescription('Remove this server\'s Nitrado connection'),
+  s=>s.setName('status').setDescription('Show this server\'s setup status'),
+  s=>{const x=s.setName('admin-role').setDescription('Set the Red Dawn admin role');return x.addRoleOption(o=>o.setName('role').setDescription('Admin role').setRequired(true));},
+  s=>s.setName('test').setDescription('Test this server\'s saved Nitrado connection'),
+  s=>s.setName('security').setDescription('Show the security configuration without secrets'),
+]));
 
 commands.push(group('server', 'Powerful Red Dawn Nitrado server tools', [
   s=>s.setName('status').setDescription('Detailed live server status'),
@@ -660,13 +789,14 @@ commands.push(group('bot', 'Red Dawn Bot controls and diagnostics', [
   s=>s.setName('commands').setDescription('Show command/action counts'),
 ]));
 
-const GROUPS = new Set(['server','player','settings','file','backup','feed','stats','moderation','community','bot']);
+const GROUPS = new Set(['setup','server','player','settings','file','backup','feed','stats','moderation','community','bot']);
 function actionCount() {
   return commands.reduce((n, c) => n + c.toJSON().options.filter(o => o.type === 1 || o.type === 2).length || 1, 0);
 }
 function commandHelpText() {
   return [
     '**🌅 RED DAWN BOT**',
+    '`/setup` — secure per-server Nitrado connection and permissions',
     '`/server` — Nitrado/server controls',
     '`/player` — players, lists, watchlist and staff tools',
     '`/settings` — Nitrado settings',
@@ -707,6 +837,58 @@ async function playersText() {
 }
 
 async function handleGroup(i, root, sc) {
+  if (root === 'setup') {
+    if (['connect','import-env','disconnect','admin-role'].includes(sc)) {
+      if (!(await requireOwner(i))) return;
+    } else if (!(await requireAdmin(i))) {
+      return;
+    }
+    if (sc === 'connect') {
+      const modal = new ModalBuilder().setCustomId('setup_connect').setTitle('Connect Nitrado to this server');
+      const serviceInput = new TextInputBuilder().setCustomId('service_id').setLabel('Nitrado Service ID').setPlaceholder('Example: 12345678').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(30);
+      const tokenInput = new TextInputBuilder().setCustomId('token').setLabel('Nitrado API / Long-life Token').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(500);
+      modal.addComponents(new ActionRowBuilder().addComponents(serviceInput), new ActionRowBuilder().addComponents(tokenInput));
+      return i.showModal(modal);
+    }
+    if (sc === 'import-env') {
+      const token = String(process.env.NITRADO_TOKEN || '').trim();
+      const sid = String(process.env.NITRADO_SERVICE_ID || '').trim();
+      if (!token || !sid) return i.reply(eph('❌ Legacy NITRADO_TOKEN/NITRADO_SERVICE_ID are not present in Render.'));
+      const data = await testNitradoCredentials(token, sid);
+      config.nitradoToken = token;
+      config.nitradoServiceId = sid;
+      config.setupCompletedAt = Date.now();
+      audit(i.user.tag, 'setup-import-env', { serviceId: sid });
+      return i.reply(eph(`✅ Imported the Nitrado connection for service \`${sid}\`. You can now remove the legacy NITRADO_TOKEN and NITRADO_SERVICE_ID from Render.\nServer: **${safe(data?.data?.gameserver?.query?.server_name || data?.data?.gameserver?.service_name || 'Connected')}**`));
+    }
+    if (sc === 'disconnect') {
+      config.nitradoToken = '';
+      config.nitradoServiceId = '';
+      config.setupCompletedAt = null;
+      config.feedsEnabled = false;
+      stopFeeds();
+      audit(i.user.tag, 'setup-disconnect');
+      return i.reply(eph('✅ Nitrado credentials removed from this server\'s encrypted configuration.'));
+    }
+    if (sc === 'status') {
+      return i.reply(eph(`🔐 **Red Dawn Security Status**\nNitrado: **${config.nitradoToken && config.nitradoServiceId ? 'CONNECTED' : 'NOT CONNECTED'}**\nService ID: ${config.nitradoServiceId ? `\`${config.nitradoServiceId}\`` : '—'}\nAdmin role: ${config.adminRoleId ? `<@&${config.adminRoleId}>` : 'Administrator / server owner'}\nDatabase-backed configuration: **ON**\nSecrets encrypted at rest: **ON**`));
+    }
+    if (sc === 'admin-role') {
+      const role = i.options.getRole('role', true);
+      config.adminRoleId = role.id;
+      audit(i.user.tag, 'setup-admin-role', { role: role.id });
+      return i.reply(eph(`✅ Red Dawn admin role set to <@&${role.id}>.`));
+    }
+    if (sc === 'test') {
+      const started = Date.now();
+      const data = await getServer(true);
+      return i.reply(eph(`✅ Nitrado connection works.\nService: \`${serviceId()}\`\nServer: **${safe(data?.data?.gameserver?.query?.server_name || data?.data?.gameserver?.service_name || 'Connected')}**\nLatency: **${Date.now() - started} ms**`));
+    }
+    if (sc === 'security') {
+      return i.reply(eph('🔒 **Red Dawn Security**\n• Each Discord server has its own Nitrado credentials.\n• Nitrado configuration is encrypted before it is stored in Postgres.\n• Only the server owner, Administrator, or configured Red Dawn admin role can manage Nitrado actions.\n• Bot tokens are never returned by commands.'));
+    }
+  }
+
   if (root === 'server') {
     if (['status','dashboard'].includes(sc)) return replyServerStatus(i);
     if (sc === 'info') return i.reply(eph(safe(JSON.stringify((await getServer(true))?.data?.gameserver || {}, null, 2), 1900)));
@@ -724,7 +906,7 @@ async function handleGroup(i, root, sc) {
     if (sc === 'latency') { const t=Date.now(); await getServer(true); return i.reply(`📡 Nitrado API latency: **${Date.now()-t} ms**`); }
     if (['start','stop','restart'].includes(sc)) {
       if (!(await requireAdmin(i))) return;
-      const id=queueAction(i.user.id, sc); return i.reply({ ...eph(`⚠️ Confirm **${sc}** on Nitrado server \`${serviceId()}\`?`), components:[confirmButtons(id)] });
+      const id=queueAction(i.guild.id,i.user.id, sc); return i.reply({ ...eph(`⚠️ Confirm **${sc}** on Nitrado server \`${serviceId()}\`?`), components:[confirmButtons(id)] });
     }
     if (sc === 'maintenance') {
       if (!(await requireAdmin(i))) return;
@@ -860,7 +1042,7 @@ async function handleGroup(i, root, sc) {
     if(sc==='ping')return i.reply(`🏓 Pong — **${client.ws.ping} ms**`);
     if(sc==='uptime')return i.reply(`⏱️ **${msDuration(Date.now()-START_TIME)}**`);
     if(sc==='about')return i.reply(`🌅 **Red Dawn Bot v${VERSION}**\nFast Discord + Nitrado tooling with grouped server, player, file, feed, stats, moderation and community commands.`);
-    if(sc==='health')return i.reply(`✅ Bot ready: **${client.isReady()}**\nDiscord ping: **${client.ws.ping} ms**\nNitrado token: **${process.env.NITRADO_TOKEN?'configured':'missing'}**\nNitrado service: **${process.env.NITRADO_SERVICE_ID?'configured':'missing'}**`);
+    if(sc==='health')return i.reply(`✅ Bot ready: **${client.isReady()}**\nDiscord ping: **${client.ws.ping} ms**\nNitrado: **${config.nitradoToken && config.nitradoServiceId ? 'configured' : 'not connected'}**`);
     if(sc==='latency'){const t=Date.now();let api='error';try{await getServer(true);api=`${Date.now()-t} ms`;}catch(e){api=e.message;}return i.reply(`📡 Discord: **${client.ws.ping} ms**\nNitrado: **${safe(api,200)}**`);}
     if(sc==='config'){return i.reply(eph(`⚙️ **Safe config**\nMaintenance: **${config.maintenance?'ON':'OFF'}**\nFeeds: **${config.feedsEnabled?'ON':'OFF'}**\nFeed files: **${config.feedFiles.length}**\nAdmin role: ${config.adminRoleId?`<@&${config.adminRoleId}>`:'not set'}\nMod role: ${config.modRoleId?`<@&${config.modRoleId}>`:'not set'}`));}
     if(sc==='cache'){return i.reply(`🧠 API cache entries: **${apiCache.size}**`);}
@@ -873,6 +1055,7 @@ async function handleConfirm(i) {
   const [verb,id]=i.customId.split(':');
   const item=pendingActions.get(id);
   if(!item) return i.update({content:'❌ This confirmation expired.',components:[]});
+  if(item.guildId!==i.guild.id) return i.reply(eph('❌ This confirmation belongs to a different server.'));
   if(item.userId!==i.user.id) return i.reply(eph('❌ Only the person who requested this action can confirm it.'));
   pendingActions.delete(id);
   if(verb==='cancel') return i.update({content:'✅ Cancelled.',components:[]});
@@ -883,37 +1066,111 @@ async function handleConfirm(i) {
 }
 
 const scheduled = new Map();
-function clearScheduled(key){if(scheduled.has(key)){clearTimeout(scheduled.get(key));scheduled.delete(key);}}
-function scheduleOneShot(){clearScheduled('one');if(!config.scheduledRestartAt)return;const delay=Math.max(1000,config.scheduledRestartAt-Date.now());scheduled.set('one',setTimeout(async()=>{try{await serverAction('restart');audit('scheduler','restart',{type:'one-shot'});}catch(e){console.error('Scheduled restart failed:',e.message);}config.scheduledRestartAt=null;saveJson(CONFIG_PATH,config);},delay));}
-function scheduleDaily(){clearScheduled('daily');if(!config.recurringRestart)return;const now=new Date();const next=new Date(now);next.setUTCHours(Number(config.recurringRestart.hourUtc),0,0,0);if(next<=now)next.setUTCDate(next.getUTCDate()+1);scheduled.set('daily',setTimeout(async()=>{try{await serverAction('restart');audit('scheduler','restart',{type:'daily'});}catch(e){console.error('Daily restart failed:',e.message);}scheduleDaily();},next-now));}
+function clearScheduled(kind) {
+  const guildId = activeContext().guildId;
+  const key = `${guildId}:${kind}`;
+  if (scheduled.has(key)) { clearTimeout(scheduled.get(key)); scheduled.delete(key); }
+}
+function scheduleOneShot() {
+  const guildId = activeContext().guildId;
+  const ownerId = activeContext().ownerId;
+  clearScheduled('one');
+  if (!config.scheduledRestartAt) return;
+  const delay = Math.max(1000, config.scheduledRestartAt - Date.now());
+  const key = `${guildId}:one`;
+  scheduled.set(key, setTimeout(() => {
+    withGuildContext(guildId, ownerId, async () => {
+      try { await serverAction('restart'); audit('scheduler','restart',{type:'one-shot'}); }
+      catch(e){ console.error(`Scheduled restart failed for ${guildId}:`, e.message); }
+      config.scheduledRestartAt = null;
+      scheduled.delete(key);
+    }).catch(e => { console.error(e.message); scheduled.delete(key); });
+  }, delay));
+}
+function scheduleDaily() {
+  const guildId = activeContext().guildId;
+  const ownerId = activeContext().ownerId;
+  clearScheduled('daily');
+  if (!config.recurringRestart) return;
+  const now = new Date();
+  const next = new Date(now);
+  next.setUTCHours(Number(config.recurringRestart.hourUtc),0,0,0);
+  if (next <= now) next.setUTCDate(next.getUTCDate()+1);
+  const key = `${guildId}:daily`;
+  scheduled.set(key, setTimeout(() => {
+    withGuildContext(guildId, ownerId, async () => {
+      try { await serverAction('restart'); audit('scheduler','restart',{type:'daily'}); }
+      catch(e){ console.error(`Daily restart failed for ${guildId}:`, e.message); }
+      scheduled.delete(key);
+      scheduleDaily();
+    }).catch(e => console.error(e.message));
+  }, next-now));
+}
 
 client.once('clientReady', async()=>{
   console.log(`${client.user.tag} is online!`);
   client.user.setPresence({activities:[{name:'Red Dawn | /help',type:3}],status:'online'});
   const rest=new REST({version:'10'}).setToken(process.env.DISCORD_TOKEN);
   try{
-    const guildId=process.env.DISCORD_GUILD_ID;
-    if(guildId){await rest.put(Routes.applicationGuildCommands(client.user.id,guildId),{body:commands.map(c=>c.toJSON())});}
-    else{await rest.put(Routes.applicationCommands(client.user.id),{body:commands.map(c=>c.toJSON())});}
+    const devGuildId=process.env.DISCORD_DEV_GUILD_ID;
+    if(devGuildId){await rest.put(Routes.applicationGuildCommands(client.user.id,devGuildId),{body:commands.map(c=>c.toJSON())});console.log(`Registered commands to dev guild ${devGuildId}.`);}
+    else{await rest.put(Routes.applicationCommands(client.user.id),{body:commands.map(c=>c.toJSON())});console.log('Registered commands globally for public installation.');}
     console.log(`Slash commands registered! ${commands.length} top-level / ${actionCount()} grouped actions.`);
   }catch(e){console.error('Command registration error:',e);}
-  if(config.feedsEnabled && config.feedFiles.length){try{await startFeeds();}catch(e){console.error('Feed start error:',e.message);}}
-  scheduleOneShot();scheduleDaily();
+  try {
+    await ensureConnectedGuilds();
+    for (const guild of client.guilds.cache.values()) {
+      await withGuildContext(guild.id, guild.ownerId, async () => {
+        if (config.feedsEnabled && config.feedFiles.length) await startFeeds();
+        scheduleOneShot();
+        scheduleDaily();
+      });
+    }
+  } catch (e) { console.error('Tenant bootstrap error:', e.message); }
+});
+
+client.on('guildCreate', async guild => {
+  try {
+    await loadTenant(guild.id, guild.ownerId);
+    console.log(`Joined guild ${guild.id}; encrypted tenant configuration initialized.`);
+  } catch (e) {
+    console.error(`Failed to initialize guild ${guild.id}:`, e.message);
+  }
 });
 
 client.on('interactionCreate', async i=>{
   try{
-    if(i.isButton()) return handleConfirm(i);
+    if(i.isButton()) {
+      if (!i.guild) return;
+      return withGuildContext(i.guild.id, i.guild.ownerId, () => handleConfirm(i));
+    }
+    if(i.isModalSubmit()) {
+      if (i.customId !== 'setup_connect' || !i.guild) return;
+      return withGuildContext(i.guild.id, i.guild.ownerId, async () => {
+        if (!(await requireOwner(i))) return;
+        const sid = i.fields.getTextInputValue('service_id').trim();
+        const token = i.fields.getTextInputValue('token').trim();
+        const data = await testNitradoCredentials(token, sid);
+        config.nitradoToken = token;
+        config.nitradoServiceId = sid;
+        config.setupCompletedAt = Date.now();
+        audit(i.user.tag, 'setup-connect', { serviceId: sid });
+        return i.reply(eph(`✅ **Nitrado connected securely.**\nService: \`${sid}\`\nServer: **${safe(data?.data?.gameserver?.query?.server_name || data?.data?.gameserver?.service_name || 'Connected')}**\n\nThe credential is stored encrypted for this Discord server only.`));
+      });
+    }
     if(!i.isChatInputCommand()) return;
-    const root=i.commandName;
-    if(root==='ping')return i.reply(`🏓 Pong — **${client.ws.ping} ms**`);
-    if(root==='status')return replyServerStatus(i);
-    if(root==='players')return i.reply(await playersText());
-    if(root==='serverinfo')return replyServerStatus(i);
-    if(root==='restart'){if(!(await requireAdmin(i)))return;const id=queueAction(i.user.id,'restart');return i.reply({ ...eph(`⚠️ Confirm **restart** on Nitrado server \`${serviceId()}\`?`),components:[confirmButtons(id)] });}
-    if(root==='nitrado'){if(!(await requireAdmin(i)))return;const t=Date.now();const d=await getServer(true);return i.reply(eph(`✅ Nitrado connected in **${Date.now()-t} ms**\nService: \`${serviceId()}\`\nServer: **${safe(d?.data?.gameserver?.query?.server_name||d?.data?.gameserver?.service_name||'Unknown')}**`));}
-    if(root==='help')return i.reply(commandHelpText());
-    if(GROUPS.has(root))return handleGroup(i,root,i.options.getSubcommand());
+    if(!i.guild) return i.reply(eph('❌ This command must be used in a Discord server.'));
+    return withGuildContext(i.guild.id, i.guild.ownerId, async () => {
+      const root=i.commandName;
+      if(root==='ping')return i.reply(`🏓 Pong — **${client.ws.ping} ms**`);
+      if(root==='status')return replyServerStatus(i);
+      if(root==='players')return i.reply(await playersText());
+      if(root==='serverinfo')return replyServerStatus(i);
+      if(root==='restart'){if(!(await requireAdmin(i)))return;const id=queueAction(i.guild.id,i.user.id,'restart');return i.reply({ ...eph(`⚠️ Confirm **restart** on Nitrado server \`${serviceId()}\`?`),components:[confirmButtons(id)] });}
+      if(root==='nitrado'){if(!(await requireAdmin(i)))return;const t=Date.now();const d=await getServer(true);return i.reply(eph(`✅ Nitrado connected in **${Date.now()-t} ms**\nService: \`${serviceId()}\`\nServer: **${safe(d?.data?.gameserver?.query?.server_name||d?.data?.gameserver?.service_name||'Unknown')}**`));}
+      if(root==='help')return i.reply(commandHelpText());
+      if(GROUPS.has(root))return handleGroup(i,root,i.options.getSubcommand());
+    });
   }catch(err){
     console.error(err);
     const msg=`❌ ${safe(err.message||'Unknown error',1600)}`;
@@ -924,6 +1181,17 @@ client.on('interactionCreate', async i=>{
 
 process.on('unhandledRejection',err=>console.error('Unhandled rejection:',err));
 process.on('uncaughtException',err=>console.error('Uncaught exception:',err));
+process.on('SIGTERM', async () => { try { await closeDatabase(); } finally { process.exit(0); } });
 
 if(!process.env.DISCORD_TOKEN) console.error('DISCORD_TOKEN is missing.');
-client.login(process.env.DISCORD_TOKEN);
+if(!process.env.DATABASE_URL) console.error('DATABASE_URL is missing.');
+(async () => {
+  try {
+    await initDatabase();
+    if (process.env.NITRADO_TOKEN || process.env.NITRADO_SERVICE_ID) console.warn('Legacy Nitrado environment variables detected. Use /setup import-env, then remove them from Render.');
+    await client.login(process.env.DISCORD_TOKEN);
+  } catch (err) {
+    console.error('Startup failed:', err.message);
+    process.exit(1);
+  }
+})();
