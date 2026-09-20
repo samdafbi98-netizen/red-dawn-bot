@@ -1,8 +1,4 @@
 .env
-config.json
-data.json
 node_modules/
 *.log
-
 data/
-*.enc

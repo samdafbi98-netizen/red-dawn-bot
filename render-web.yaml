@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: dawn-bot-web
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm run web

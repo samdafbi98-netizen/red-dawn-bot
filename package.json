@@ -1,18 +1,19 @@
 {
-  "name": "red-dawn-bot",
-  "version": "5.0.0",
-  "description": "Public multi-server Red Dawn Discord + Nitrado control center with per-guild encrypted configuration and owner/admin authorization.",
-  "main": "dawn.js",
+  "name": "dawn-bot-cutthroat",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Dawn Bot for the CUTTHROAT DayZ community: Discord control panel, secure Nitrado token setup, server feeds and moderation/logging foundations.",
+  "main": "worker.js",
   "scripts": {
-    "start": "node dawn.js",
-    "check": "node --check dawn.js"
+    "start": "node worker.js",
+    "web": "node web.js"
   },
   "engines": {
-    "node": "22.x"
+    "node": ">=20"
   },
   "dependencies": {
-    "discord.js": "^14.25.1",
+    "discord.js": "^14.22.1",
     "dotenv": "^17.2.2",
-    "pg": "^8.16.3"
+    "express": "^5.1.0"
   }
 }
