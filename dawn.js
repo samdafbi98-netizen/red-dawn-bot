@@ -28,6 +28,16 @@ const { encryptJson, decryptJson } = require('./security');
 
 const VERSION = '5.0.0';
 const START_TIME = Date.now();
+
+// Discord client
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
+});
 const ROOT = __dirname;
 const CONFIG_PATH = path.join(ROOT, 'config.json');
 const STATS_PATH = path.join(ROOT, 'stats.json');
