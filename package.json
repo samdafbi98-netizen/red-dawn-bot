@@ -1,19 +1,20 @@
 {
-  "name": "dawn-bot-cutthroat",
-  "version": "1.0.0",
+  "name": "dawn-bot-v6",
+  "version": "6.0.0",
   "private": true,
-  "description": "Dawn Bot for the CUTTHROAT DayZ community: Discord control panel, secure Nitrado token setup, server feeds and moderation/logging foundations.",
-  "main": "worker.js",
+  "description": "Dawn Bot V6 DayZ server management platform",
+  "main": "src/index.js",
   "scripts": {
-    "start": "node worker.js",
-    "web": "node web.js"
-  },
-  "engines": {
-    "node": ">=20"
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "register": "node src/register-commands.js"
   },
 "dependencies": {
   "discord.js": "^14.0.0",
   "dotenv": "^16.0.0",
   "pg": "^8.16.3"
-}
+},
+  "engines": {
+    "node": ">=20"
+  }
 }

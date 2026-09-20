@@ -1,75 +1,36 @@
-# Dawn Bot — CUTTHROAT
+# Dawn Bot V6
 
-A fresh Discord/Nitrado foundation for the CUTTHROAT DayZ community.
+A secure DayZ Discord server-management foundation for Cutthroat / Red Dawn.
 
-## What is included
-
-- `/setup` — creates the Discord structure
-- `/feeds setup` — creates feed categories/channels
-- `/feeds list` — shows feed channel mappings
-- `/nitrado connect` — opens a secure Discord modal for the Nitrado token
-- `/nitrado status` — validates the stored Nitrado connection
-- `/nitrado disconnect` — removes the active connection
-- Discord member join/leave logging
-- Nitrado request timeout handling
-- Encrypted Nitrado token storage in the running process
-- Lightweight web health/control page
-- No trader feeds
+## Features
+- Protected bot core: Discord users configure the server, not source files.
+- `/setup` creates the complete feed layout.
+- `/dashboard`, `/feeds`, `/diagnostics`, `/server`, and `/audit`.
+- Detailed Discord embeds.
+- PostgreSQL-backed configuration and event queue.
+- Idempotency protection.
+- Priority queueing.
+- Retry with exponential backoff + jitter.
+- Dead-letter handling.
+- Configurable worker concurrency.
+- Role-based command authorization.
+- Nitrado credentials stored only in environment variables.
+- No trader-feed subsystem.
 
 ## Important
-
-This is a clean foundation, not a fake guarantee of instant DayZ data.
-
-Dawn Bot can only produce a true DayZ/Nitrado feed when the upstream Nitrado service/API exposes the corresponding data. The feed engine should use persistent/event-driven sources where available, cache state, suppress duplicates, and respect Nitrado/Discord rate limits.
-
-The starter intentionally does not invent kill/death/player-log data that the connected API does not provide.
-
-## Environment
-
-Copy `.env.example` to `.env` and fill in:
-
-- `DISCORD_TOKEN`
-- `RED_DAWN_MASTER_KEY`
-- optionally `DISCORD_DEV_GUILD_ID`
-- `WEB_PORT`
-- `PUBLIC_URL`
-
-Generate a strong random `RED_DAWN_MASTER_KEY`. Never commit `.env`.
-
-## Discord setup
-
-1. Invite the bot with the `bot` and `applications.commands` scopes.
-2. Give it the channel-management permissions needed to create categories/channels.
-3. Run `/setup`.
-4. Run `/nitrado connect`.
-5. Paste the Nitrado API token into the private modal.
-6. Run `/nitrado status`.
+This package deliberately does not invent unsupported DayZ/Nitrado events. The `src/adapters/nitrado.js` adapter is the integration boundary where the currently supported Nitrado data source should be connected.
 
 ## Render
+Background Worker:
+- Build Command: `npm ci`
+- Start Command: `npm start`
 
-For the Discord bot, use a Background Worker with:
-
-`npm start`
-
-For the web service, use a Web Service with:
-
-`npm run web`
-
-Set the same environment variables in the Render service(s).
-
-## Production upgrade path
-
-The next production pass should add:
-
-1. PostgreSQL persistence using `DATABASE_URL`
-2. Per-guild encrypted credential records
-3. Nitrado service/server selection
-4. Persistent collector workers
-5. Event queue with retry/backoff
-6. Duplicate-event suppression
-7. Feed latency metrics
-8. Server/player state reconciliation
-9. Admin audit log
-10. Dashboard authentication and per-guild configuration
-
-Never place a real token in source code, GitHub, screenshots, or Discord messages.
+Set these environment variables:
+- `DISCORD_TOKEN`
+- `DISCORD_CLIENT_ID`
+- `DISCORD_GUILD_ID`
+- `DATABASE_URL`
+- `NITRADO_TOKEN` (when the supported Nitrado integration is connected)
+- `NITRADO_SERVICE_ID` (when required by the supported integration)
+- `DAWN_OWNER_ROLE_ID` (optional)
+- `WORKER_CONCURRENCY` (default 4)
