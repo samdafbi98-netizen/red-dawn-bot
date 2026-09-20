@@ -1,0 +1,19 @@
+{
+  "adminRoleId": "",
+  "modRoleId": "",
+  "maintenance": false,
+  "feedsEnabled": false,
+  "feedIntervalMs": 10000,
+  "feedChannels": {},
+  "feedFiles": [],
+  "watchlist": [],
+  "notes": {},
+  "warnings": {},
+  "reports": [],
+  "events": [],
+  "scheduledRestartAt": null,
+  "recurringRestart": null,
+  "audit": [],
+  "nitradoServiceId": "",
+  "setupCompletedAt": null
+}
